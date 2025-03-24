@@ -1,0 +1,104 @@
+{
+  "name": "doug",
+  "displayName": "Doug",
+  "description": "VSCode extension for communicating with OpenRouter",
+  "version": "0.0.1",
+  "publisher": "rchoi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rmerk/doug"
+  },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "openrouter",
+    "chat",
+    "code",
+    "assistant"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "doug.openChatPanel",
+        "title": "Doug: Open Chat Panel"
+      },
+      {
+        "command": "doug.selectModel",
+        "title": "Doug: Select AI Model"
+      },
+      {
+        "command": "doug.addContextFromFile",
+        "title": "Doug: Add Current File to Context"
+      },
+      {
+        "command": "doug.testConnection",
+        "title": "Doug: Test OpenRouter Connection"
+      }
+    ],
+    "configuration": {
+      "title": "Doug AI Assistant",
+      "properties": {
+        "aiCodingAssistant.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenRouter API Key"
+        },
+        "aiCodingAssistant.defaultModel": {
+          "type": "string",
+          "default": "anthropic/claude-3-opus",
+          "description": "Default AI model to use"
+        },
+        "aiCodingAssistant.contextWindowSize": {
+          "type": "number",
+          "default": 100000,
+          "description": "Maximum number of tokens to include in the context window"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir dist/test",
+    "watch-tests": "tsc -p . -w --outDir dist/test",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test",
+    "vsix": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/axios": "^0.14.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.x",
+    "@types/vscode": "^1.96.0",
+    "@typescript-eslint/eslint-plugin": "^8.17.0",
+    "@typescript-eslint/parser": "^8.17.0",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.3.0",
+    "esbuild": "^0.25.1",
+    "eslint": "^9.23.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.9"
+  },
+  "dependencies": {
+    "axios": "^1.8.4"
+  }
+}
