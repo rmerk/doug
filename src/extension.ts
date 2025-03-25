@@ -9,6 +9,7 @@ import { ModelSelector } from './ui/modelSelector';
 import { StatusBarManager } from './ui/statusBarItem';
 import { OpenRouterModel, OpenRouterChatMessage } from './types/openRouter';
 import { ServiceContainer, ExtensionState } from './types/extension';
+import { ChatHistoryService } from './services/chatHistoryService';
 
 // Extension state
 let state: ExtensionState = {
@@ -111,6 +112,9 @@ export async function activate(context: vscode.ExtensionContext) {
     testConnectionCommand,
     statusBar
   );
+
+  // Initialize the ChatHistoryService
+  ChatHistoryService.initialize(context);
 
   // Initialize models on startup
   try {

@@ -1,11 +1,15 @@
 import * as vscode from 'vscode';
 import { WebviewMessage } from '../types/extension';
 import { OpenRouterModel, OpenRouterChatMessage } from '../types/openRouter';
+import { ChatHistoryService, ChatHistoryItem } from '../services/chatHistoryService';
+import { formatRelativeTime } from '../utils/dateUtils';
 
 export class ChatWebviewPanel {
   public static currentPanel: ChatWebviewPanel | undefined;
   private readonly panel: vscode.WebviewPanel;
   private disposables: vscode.Disposable[] = [];
+  private chatHistory: ChatHistoryItem[] = [];
+  private currentChatId: string | null = null;
 
   private constructor(
     panel: vscode.WebviewPanel,
@@ -16,6 +20,9 @@ export class ChatWebviewPanel {
     private onChangeModel: () => void
   ) {
     this.panel = panel;
+
+    // Load chat history
+    this.loadChatHistory();
 
     // Set the webview's HTML content
     this.updateContent();
@@ -41,6 +48,10 @@ export class ChatWebviewPanel {
           case 'sendMessage':
             if (message.payload && typeof message.payload === 'string') {
               this.onSendMessage(message.payload);
+              // Update or create chat in history if there are messages
+              if (this.messages.length > 0) {
+                await this.saveCurrentChat();
+              }
             }
             break;
           case 'changeModel':
@@ -52,11 +63,103 @@ export class ChatWebviewPanel {
           case 'openPrivacySettings':
             void vscode.env.openExternal(vscode.Uri.parse('https://openrouter.ai/settings/privacy'));
             break;
+          case 'deleteChat':
+            if (message.payload && typeof message.payload === 'string') {
+              await this.deleteChat(message.payload);
+            }
+            break;
+          case 'loadChat':
+            if (message.payload && typeof message.payload === 'string') {
+              await this.loadChat(message.payload);
+            }
+            break;
+          case 'newChat':
+            this.startNewChat();
+            break;
         }
       },
       null,
       this.disposables
     );
+  }
+
+  private async loadChatHistory(): Promise<void> {
+    this.chatHistory = await ChatHistoryService.getChats();
+    console.log('Loaded chat history:', this.chatHistory.length, 'items');
+    this.updateContent();
+  }
+
+  private async saveCurrentChat(): Promise<void> {
+    if (this.messages.length === 0) {
+      return;
+    }
+
+    try {
+      let chat: ChatHistoryItem;
+      const title = ChatHistoryService.generateTitleFromMessages(this.messages);
+
+      if (this.currentChatId) {
+        // Update existing chat
+        const updatedChat = await ChatHistoryService.updateChatMessages(this.currentChatId, this.messages);
+        if (!updatedChat) {
+          // If chat no longer exists, create a new one
+          chat = await ChatHistoryService.createChat(title, this.messages);
+          this.currentChatId = chat.id;
+        }
+      } else {
+        // Create new chat
+        chat = await ChatHistoryService.createChat(title, this.messages);
+        this.currentChatId = chat.id;
+      }
+
+      // Refresh chat history
+      await this.loadChatHistory();
+    } catch (error) {
+      console.error('Error saving chat:', error);
+    }
+  }
+
+  private async deleteChat(chatId: string): Promise<void> {
+    try {
+      await ChatHistoryService.deleteChat(chatId);
+
+      // If we deleted the current chat, start a new one
+      if (chatId === this.currentChatId) {
+        this.startNewChat();
+      }
+
+      // Refresh chat history
+      await this.loadChatHistory();
+
+      // Notify the webview that deletion was successful so it can clear any local state
+      void this.panel.webview.postMessage({
+        command: 'chatDeleted',
+        payload: chatId
+      });
+    } catch (error) {
+      console.error(`Error deleting chat ${chatId}:`, error);
+    }
+  }
+
+  private async loadChat(chatId: string): Promise<void> {
+    try {
+      const chats = await ChatHistoryService.getChats();
+      const chat = chats.find(c => c.id === chatId);
+
+      if (chat) {
+        this.currentChatId = chat.id;
+        this.messages = [...chat.messages];
+        this.updateContent();
+      }
+    } catch (error) {
+      console.error(`Error loading chat ${chatId}:`, error);
+    }
+  }
+
+  private startNewChat(): void {
+    this.currentChatId = null;
+    this.messages = [];
+    this.updateContent();
   }
 
   public static createOrShow(
@@ -123,6 +226,8 @@ export class ChatWebviewPanel {
 
   public updateMessages(messages: OpenRouterChatMessage[]): void {
     this.messages = messages;
+    // Save chat when messages are updated
+    void this.saveCurrentChat();
     this.updateContent();
   }
 
@@ -149,9 +254,54 @@ export class ChatWebviewPanel {
 
   private updateContent(): void {
     this.panel.webview.html = this.getHtmlForWebview();
+
+    // Ensure event handlers are reattached when content is updated
+    // But no direct setupEventHandlers call in TypeScript code
+    void this.panel.webview.postMessage({
+      command: 'setupEventHandlers'
+    });
   }
 
   private getHtmlForWebview(): string {
+    console.log('Rendering webview HTML with', this.chatHistory.length, 'chat history items');
+
+    // Format chat history - completely rewritten section
+    let historyContent = '';
+
+    if (this.chatHistory.length > 0) {
+      historyContent = `
+        <div class="today-section">Today</div>
+        <div class="history-items">
+      `;
+
+      // Add each chat history item
+      for (const chat of this.chatHistory) {
+        const formattedTime = formatRelativeTime(chat.lastInteractionAt);
+        const truncatedTitle = chat.title.length > 30 ? `${chat.title.slice(0, 30)}...` : chat.title;
+        const isActive = chat.id === this.currentChatId;
+
+        historyContent += `
+          <div class="history-item ${isActive ? 'active' : ''}" data-id="${chat.id}">
+            <div class="history-info" onclick="loadChat('${chat.id}')">
+              <div class="history-title" title="${chat.title}">${truncatedTitle}</div>
+              <div class="history-time">${formattedTime}</div>
+            </div>
+            <div class="history-delete-btn" data-chat-id="${chat.id}" title="Delete chat" onclick="deleteChat('${chat.id}', event)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 6h18"></path>
+                <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+              </svg>
+            </div>
+          </div>
+        `;
+      }
+
+      historyContent += `</div>`;
+    } else {
+      historyContent = '<div class="no-history">No chat history yet</div>';
+    }
+
     // Format the messages for display
     const formattedMessages = this.messages
       .map(msg => {
@@ -171,12 +321,14 @@ export class ChatWebviewPanel {
       })
       .join('');
 
-    return `
+    // Create HTML with chat history popover and chat content
+    return /* html */`
       <!DOCTYPE html>
       <html lang="en">
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.panel.webview.cspSource} 'unsafe-inline'; script-src ${this.panel.webview.cspSource} 'unsafe-inline'; img-src ${this.panel.webview.cspSource} https:;">
         <title>AI Assistant</title>
         <style>
           body {
@@ -187,7 +339,7 @@ export class ChatWebviewPanel {
             padding: 0;
             margin: 0;
           }
-          .container {
+          .app-container {
             display: flex;
             flex-direction: column;
             height: 100vh;
@@ -198,6 +350,136 @@ export class ChatWebviewPanel {
             justify-content: space-between;
             align-items: center;
             border-bottom: 1px solid var(--vscode-panel-border);
+            position: relative;
+          }
+          .header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+          }
+          .history-button {
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: var(--vscode-foreground);
+            padding: 5px;
+            display: flex;
+            align-items: center;
+            opacity: 0.8;
+            border-radius: 3px;
+          }
+          .history-button:hover {
+            opacity: 1;
+            background-color: var(--vscode-list-hoverBackground);
+          }
+          .history-button svg {
+            margin-right: 5px;
+          }
+          .chat-history-popover {
+            position: absolute;
+            top: 50px;
+            left: 15px;
+            width: 300px;
+            max-height: 400px;
+            background-color: var(--vscode-editorWidget-background);
+            border: 1px solid var(--vscode-editorWidget-border);
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 1000;
+            overflow: hidden;
+            display: none;
+            flex-direction: column;
+          }
+          .popover-header {
+            padding: 12px 15px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+          }
+          .popover-header h3 {
+            margin: 0;
+            font-size: 14px;
+          }
+          .chat-history {
+            overflow-y: auto;
+            max-height: 350px;
+          }
+          .history-items {
+            margin: 0;
+            padding: 0;
+          }
+          .history-item {
+            padding: 10px 15px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background-color 0.2s;
+          }
+          .today-section {
+            padding: 5px 15px;
+            font-size: 12px;
+            color: var(--vscode-descriptionForeground);
+            border-bottom: 1px solid var(--vscode-panel-border);
+            background-color: var(--vscode-editorWidget-background);
+          }
+          .history-item:hover {
+            background-color: var(--vscode-list-hoverBackground);
+          }
+          .history-item.active {
+            background-color: var(--vscode-list-activeSelectionBackground);
+            color: var(--vscode-list-activeSelectionForeground);
+          }
+          .history-info {
+            flex: 1;
+            cursor: pointer;
+            overflow: hidden;
+          }
+          .history-title {
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .history-time {
+            font-size: 12px;
+            color: var(--vscode-descriptionForeground);
+            margin-top: 4px;
+          }
+          .history-delete-btn {
+            background: none;
+            border: none;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 3px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.6;
+            min-width: 28px;
+            min-height: 28px;
+          }
+          .history-delete-btn:hover {
+            opacity: 1;
+            background-color: var(--vscode-editor-hoverHighlightBackground);
+          }
+          .history-delete-btn svg {
+            cursor: pointer;
+          }
+          .history-item.active .history-time {
+            color: var(--vscode-list-activeSelectionForeground);
+            opacity: 0.8;
+          }
+          .new-chat-btn {
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 6px 12px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
           }
           .model-info {
             font-size: 0.9em;
@@ -249,166 +531,303 @@ export class ChatWebviewPanel {
             padding: 15px;
             border-top: 1px solid var(--vscode-panel-border);
           }
-          .input-container {
-            display: flex;
-            gap: 10px;
-          }
-          textarea {
-            flex: 1;
-            min-height: 60px;
-            resize: vertical;
-            padding: 8px;
+          #user-input {
+            width: 100%;
+            height: 80px;
+            resize: none;
+            padding: 10px;
+            border: 1px solid var(--vscode-input-border);
             background-color: var(--vscode-input-background);
             color: var(--vscode-input-foreground);
-            border: 1px solid var(--vscode-input-border);
             border-radius: 3px;
+            font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size);
           }
-          button {
-            padding: 8px 15px;
+          #user-input:focus {
+            outline: none;
+            border-color: var(--vscode-focusBorder);
+          }
+          .buttons {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+          }
+          .send-btn {
             background-color: var(--vscode-button-background);
             color: var(--vscode-button-foreground);
             border: none;
+            padding: 6px 12px;
             border-radius: 3px;
             cursor: pointer;
           }
-          button:hover {
-            background-color: var(--vscode-button-hoverBackground);
-          }
-          button:disabled {
+          .send-btn:disabled {
             opacity: 0.6;
             cursor: not-allowed;
           }
-          .command-buttons {
-            display: flex;
-            gap: 10px;
+          .action-link {
+            color: var(--vscode-textLink-foreground);
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            cursor: pointer;
+            text-decoration: underline;
+          }
+          .loading-indicator {
+            display: none;
             margin-top: 10px;
-            justify-content: flex-end;
+            color: var(--vscode-descriptionForeground);
           }
           .troubleshooting {
+            display: none;
             margin-top: 15px;
             padding: 10px;
-            background-color: var(--vscode-editorWidget-background);
-            border-radius: 5px;
+            border-radius: 3px;
+            background-color: var(--vscode-inputValidation-infoBackground);
+            border: 1px solid var(--vscode-inputValidation-infoBorder);
           }
-          .troubleshooting h3 {
-            margin-top: 0;
+          .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--vscode-descriptionForeground);
+            padding: 20px;
+            text-align: center;
           }
-          .troubleshooting button {
-            margin-top: 5px;
+          .empty-state h2 {
+            margin-bottom: 10px;
           }
-          .hidden {
-            display: none;
+          .no-history {
+            padding: 20px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
           }
         </style>
       </head>
       <body>
-        <div class="container">
+        <div class="app-container">
           <div class="header">
-            <div class="model-info">
-              Selected model: <strong>${this.selectedModel ? this.selectedModel.name : 'None selected'}</strong>
+            <div class="header-left">
+              <button class="history-button" onclick="toggleHistoryPopover()" title="Chat History">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 3h18v18H3zM3 8h18M8 3v18"></path>
+                </svg>
+                Doug AI Assistant
+              </button>
+
+              <!-- Chat History Popover -->
+              <div class="chat-history-popover" id="historyPopover">
+                <div class="popover-header">
+                  <h3>Chat History</h3>
+                  <button class="new-chat-btn" onclick="startNewChat()">New Chat</button>
+                </div>
+                <div class="chat-history">
+                  ${historyContent}
+                </div>
+              </div>
             </div>
-            <button id="change-model-button">Change Model</button>
+
+            <div class="model-info">
+              ${this.selectedModel ? `Model: ${this.selectedModel.name} <button class="action-link" onclick="changeModel()">Change</button>` : `
+                No model selected <button class="action-link" onclick="changeModel()">Select Model</button>
+              `}
+            </div>
           </div>
 
-          <div class="messages" id="messages-container">
-            ${formattedMessages ||
-              '<div class="message system"><div class="message-content">Welcome to Doug! No messages yet. Start a conversation below.</div></div>'}
+          <div class="messages" id="messages">
+            ${formattedMessages.length ? formattedMessages : `
+              <div class="empty-state">
+                <h2>Welcome to Doug AI Assistant</h2>
+                <p>Start a conversation by typing a message below.</p>
+              </div>
+            `}
+          </div>
+
+          <div class="troubleshooting" id="troubleshooting">
+            <p id="troubleshooting-message">Looks like there might be a connection issue.</p>
+            <p>
+              <button class="action-link" onclick="testConnection()">Test connection</button> or
+              <button class="action-link" onclick="openPrivacySettings()">check your privacy settings</button>
+            </p>
           </div>
 
           <div class="input-area">
-            <div class="input-container">
-              <textarea id="message-input" placeholder="Ask a question..."></textarea>
-              <button id="send-button">Send</button>
-            </div>
-
-            <div class="command-buttons">
-              <button id="test-connection-button">Test Connection</button>
-            </div>
-
-            <div id="troubleshooting-section" class="troubleshooting hidden">
-              <h3>Troubleshooting OpenRouter</h3>
-              <p id="troubleshooting-message">If you're having connection issues with OpenRouter, try these steps:</p>
-              <ul>
-                <li>Check your API key is valid and properly formatted (starting with sk-or-v1-)</li>
-                <li>Verify your OpenRouter account has access to the selected model</li>
-                <li>Check your OpenRouter privacy settings at <a href="#" id="privacy-settings-link">openrouter.ai/settings/privacy</a></li>
-              </ul>
-              <button id="hide-troubleshooting-button">Hide</button>
+            <textarea id="user-input" placeholder="Type your message..." rows="3"></textarea>
+            <div class="buttons">
+              <div class="loading-indicator" id="loading-indicator">Processing...</div>
+              <button class="send-btn" id="send-button" onclick="sendMessage()">Send</button>
             </div>
           </div>
         </div>
 
         <script>
-          // Get DOM elements
           const vscode = acquireVsCodeApi();
-          const messagesContainer = document.getElementById('messages-container');
-          const messageInput = document.getElementById('message-input');
+          const messagesContainer = document.getElementById('messages');
+          const userInput = document.getElementById('user-input');
           const sendButton = document.getElementById('send-button');
-          const changeModelButton = document.getElementById('change-model-button');
-          const testConnectionButton = document.getElementById('test-connection-button');
-          const troubleshootingSection = document.getElementById('troubleshooting-section');
-          const hideTroubleshootingButton = document.getElementById('hide-troubleshooting-button');
-          const privacySettingsLink = document.getElementById('privacy-settings-link');
+          const loadingIndicator = document.getElementById('loading-indicator');
+          const troubleshootingSection = document.getElementById('troubleshooting');
+          const troubleshootingMessage = document.getElementById('troubleshooting-message');
+          const historyPopover = document.getElementById('historyPopover');
 
-          // Scroll to the bottom of the messages
+          // Scroll to bottom of messages
           function scrollToBottom() {
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
           }
+
+          // Initialize with scroll to bottom
           scrollToBottom();
 
-          // Handle sending a message
-          function sendMessage() {
-            const message = messageInput.value.trim();
-            if (message) {
-              vscode.postMessage({
-                command: 'sendMessage',
-                payload: message
+          // Focus on input
+          userInput.focus();
+
+          // Add event listeners for delete buttons - improved with better error handling and debugging
+          function setupDeleteButtons() {
+            console.log('Setting up delete buttons');
+            const deleteButtons = document.querySelectorAll('.history-delete-btn');
+            console.log('Found', deleteButtons.length, 'delete buttons');
+
+            deleteButtons.forEach(button => {
+              // Remove any existing event listeners to prevent duplicates
+              const newButton = button.cloneNode(true);
+              button.parentNode.replaceChild(newButton, button);
+
+              newButton.addEventListener('click', function(event) {
+                console.log('Delete button clicked');
+                // Stop event propagation immediately
+                event.stopPropagation();
+                event.preventDefault();
+
+                const chatId = this.getAttribute('data-chat-id');
+                console.log('Chat ID to delete:', chatId);
+
+                if (chatId) {
+                  if (confirm('Are you sure you want to delete this chat?')) {
+                    try {
+                      console.log('Confirmed deletion of chat:', chatId);
+                      vscode.postMessage({
+                        command: 'deleteChat',
+                        payload: chatId
+                      });
+
+                      // Visual feedback that delete was requested
+                      const chatItem = this.closest('.history-item');
+                      if (chatItem) {
+                        chatItem.style.opacity = '0.5';
+                      }
+                    } catch (error) {
+                      console.error('Error sending delete message:', error);
+                      alert('Failed to delete chat. Please try again.');
+                    }
+                  }
+                } else {
+                  console.error('No chat ID found for delete button');
+                }
               });
+            });
+          }
 
-              // Clear the input
-              messageInput.value = '';
+          // Run setup when the DOM is fully loaded
+          document.addEventListener('DOMContentLoaded', setupDeleteButtons);
 
-              // Disable the send button while processing
-              sendButton.disabled = true;
+          // Also run setup immediately in case the DOM is already loaded
+          setupDeleteButtons();
+
+          // Toggle history popover visibility
+          function toggleHistoryPopover() {
+            if (historyPopover.style.display === 'flex') {
+              historyPopover.style.display = 'none';
+            } else {
+              historyPopover.style.display = 'flex';
+              // Re-attach event listeners when popover is opened
+              setupDeleteButtons();
             }
           }
 
-          // Listen for enter key press in the textarea
-          messageInput.addEventListener('keydown', (e) => {
+          // Click outside to close popover
+          document.addEventListener('click', (e) => {
+            const isHistoryButton = e.target.closest('.history-button');
+            const isHistoryPopover = e.target.closest('.chat-history-popover');
+
+            if (!isHistoryButton && !isHistoryPopover && historyPopover.style.display === 'flex') {
+              historyPopover.style.display = 'none';
+            }
+          });
+
+          // Handle sending a message
+          function sendMessage() {
+            const message = userInput.value.trim();
+            if (!message) return;
+
+            // Send message to extension
+            vscode.postMessage({
+              command: 'sendMessage',
+              payload: message
+            });
+
+            // Clear input
+            userInput.value = '';
+
+            // Focus back on input
+            userInput.focus();
+
+            // Close history popover if open
+            historyPopover.style.display = 'none';
+          }
+
+          // Handle model change request
+          function changeModel() {
+            vscode.postMessage({
+              command: 'changeModel'
+            });
+
+            // Close history popover if open
+            historyPopover.style.display = 'none';
+          }
+
+          // Handle test connection
+          function testConnection() {
+            vscode.postMessage({
+              command: 'testConnection'
+            });
+          }
+
+          // Handle privacy settings
+          function openPrivacySettings() {
+            vscode.postMessage({
+              command: 'openPrivacySettings'
+            });
+          }
+
+          // Load chat
+          function loadChat(chatId) {
+            vscode.postMessage({
+              command: 'loadChat',
+              payload: chatId
+            });
+
+            // Close history popover
+            historyPopover.style.display = 'none';
+          }
+
+          // Start new chat
+          function startNewChat() {
+            vscode.postMessage({
+              command: 'newChat'
+            });
+
+            // Close history popover
+            historyPopover.style.display = 'none';
+          }
+
+          // Handle enter key to send
+          userInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
               sendMessage();
             }
-          });
-
-          // Send button click handler
-          sendButton.addEventListener('click', sendMessage);
-
-          // Change model button handler
-          changeModelButton.addEventListener('click', () => {
-            vscode.postMessage({
-              command: 'changeModel'
-            });
-          });
-
-          // Test connection button handler
-          testConnectionButton.addEventListener('click', () => {
-            vscode.postMessage({
-              command: 'testConnection'
-            });
-          });
-
-          // Privacy settings link handler
-          privacySettingsLink.addEventListener('click', (e) => {
-            e.preventDefault();
-            vscode.postMessage({
-              command: 'openPrivacySettings'
-            });
-          });
-
-          // Hide troubleshooting section handler
-          hideTroubleshootingButton.addEventListener('click', () => {
-            troubleshootingSection.classList.add('hidden');
           });
 
           // Listen for messages from the extension
@@ -417,38 +836,104 @@ export class ChatWebviewPanel {
 
             switch (message.command) {
               case 'updateLoadingState':
-                sendButton.disabled = message.payload;
+                if (message.payload) {
+                  loadingIndicator.style.display = 'block';
+                  sendButton.disabled = true;
+                } else {
+                  loadingIndicator.style.display = 'none';
+                  sendButton.disabled = false;
+                  scrollToBottom();
+                }
                 break;
 
               case 'appendAssistantMessage':
-                // In a full implementation, we would add proper rendering
-                // For now, just reloading the entire webview when messages change
+                // This would be handled if implementing streaming
+                scrollToBottom();
                 break;
 
               case 'showTroubleshooting':
-                troubleshootingSection.classList.remove('hidden');
+                troubleshootingSection.style.display = 'block';
                 if (message.payload && message.payload.message) {
-                  document.getElementById('troubleshooting-message').textContent = message.payload.message;
+                  troubleshootingMessage.textContent = message.payload.message;
                 }
+                break;
+
+              case 'chatDeleted':
+                // Remove the deleted chat from the UI immediately without waiting for a refresh
+                if (message.payload) {
+                  const deletedChatId = message.payload;
+                  const selector = '.history-item[data-id="' + deletedChatId + '"]';
+                  const chatElement = document.querySelector(selector);
+                  if (chatElement) {
+                    chatElement.remove();
+                    console.log('Removed chat with ID ' + deletedChatId + ' from UI');
+
+                    // If no more chat items, show empty state
+                    const historyItems = document.querySelectorAll('.history-item');
+                    if (historyItems.length === 0) {
+                      const chatHistory = document.querySelector('.chat-history');
+                      if (chatHistory) {
+                        chatHistory.innerHTML = '<div class="no-history">No chat history yet</div>';
+                      }
+                    }
+                  }
+                }
+                break;
+
+              case 'setupEventHandlers':
+                // Setup delete buttons and other event handlers
+                setupDeleteButtons();
                 break;
             }
           });
+
+          // For debugging
+          console.log("History popover initialized");
+
+          // Also add direct delete function to avoid event listener issues
+          function deleteChat(chatId, event) {
+            // Stop event propagation
+            if (event) {
+              event.stopPropagation();
+              event.preventDefault();
+            }
+
+            console.log('Delete chat function called for chat ID:', chatId);
+
+            if (chatId && confirm('Are you sure you want to delete this chat?')) {
+              try {
+                console.log('Confirmed deletion of chat:', chatId);
+                vscode.postMessage({
+                  command: 'deleteChat',
+                  payload: chatId
+                });
+
+                // Visual feedback
+                const chatItem = document.querySelector('.history-item[data-id="' + chatId + '"]');
+                if (chatItem) {
+                  chatItem.style.opacity = '0.5';
+                }
+              } catch (error) {
+                console.error('Error sending delete message:', error);
+                alert('Failed to delete chat. Please try again.');
+              }
+            }
+          }
         </script>
       </body>
-      </html>
-    `;
+      </html>` as string;
   }
 
   private dispose(): void {
     ChatWebviewPanel.currentPanel = undefined;
 
-    // Clean up resources
+    // Clean up our resources
     this.panel.dispose();
 
     while (this.disposables.length) {
-      const disposable = this.disposables.pop();
-      if (disposable) {
-        disposable.dispose();
+      const x = this.disposables.pop();
+      if (x) {
+        x.dispose();
       }
     }
   }
